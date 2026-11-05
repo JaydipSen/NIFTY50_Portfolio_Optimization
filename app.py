@@ -139,16 +139,23 @@ def download_data(stocks, start, end):
 
 def calculate_mvp(returns):
 
-    cov = returns.cov().values
-    n = len(returns.columns)
+    cov = returns.cov().to_numpy(copy=True)
+
+    # Ensure numerical symmetry
+    cov = (cov + cov.T) / 2
+
+    n = cov.shape[0]
 
     initial_weights = np.ones(n) / n
 
     def portfolio_variance(weights):
-        return weights @ cov @ weights
+        return float(weights @ cov @ weights)
 
     constraints = [
-        {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+        {
+            "type": "eq",
+            "fun": lambda w: np.sum(w) - 1
+        }
     ]
 
     bounds = [(0, 1)] * n
@@ -159,13 +166,17 @@ def calculate_mvp(returns):
         method="SLSQP",
         bounds=bounds,
         constraints=constraints,
-        options={"maxiter": 2000, "ftol": 1e-12}
+        options={
+            "maxiter": 2000,
+            "ftol": 1e-12
+        }
     )
 
     if not result.success:
-        raise ValueError("MVP optimization failed: " + result.message)
+        raise ValueError(result.message)
 
     weights = np.clip(result.x, 0, 1)
+
     weights /= weights.sum()
 
     return pd.Series(
@@ -191,15 +202,26 @@ def cluster_variance(cov, cluster):
 
 def calculate_hrp(returns):
 
-    cov = returns.cov()
-    corr = returns.corr().clip(-1, 1)
+    # Explicitly create independent, writable arrays
+    cov = returns.cov().copy(deep=True)
+    corr = returns.corr().copy(deep=True)
 
-    distance = np.sqrt((1 - corr) / 2)
+    # Clip correlations
+    corr = corr.clip(-1, 1)
 
-    np.fill_diagonal(distance.values, 0)
+    # Calculate correlation distance using a writable NumPy array
+    corr_array = corr.to_numpy(copy=True)
 
+    distance_array = np.sqrt(
+        np.maximum(0, (1 - corr_array) / 2)
+    )
+
+    # Set diagonal to zero
+    np.fill_diagonal(distance_array, 0.0)
+
+    # Hierarchical clustering
     condensed = squareform(
-        distance.values,
+        distance_array,
         checks=False
     )
 
@@ -237,7 +259,9 @@ def calculate_hrp(returns):
             var_left = cluster_variance(cov, left)
             var_right = cluster_variance(cov, right)
 
-            alpha = 1 - var_left / (var_left + var_right)
+            alpha = 1 - var_left / (
+                var_left + var_right
+            )
 
             weights[left] *= alpha
             weights[right] *= (1 - alpha)
@@ -247,12 +271,12 @@ def calculate_hrp(returns):
         clusters = next_clusters
 
     weights = weights.reindex(returns.columns)
+
     weights /= weights.sum()
 
     weights.name = "HRP"
 
     return weights
-
 # ------------------------------------------------
 # 5. PERFORMANCE METRICS
 # ------------------------------------------------
